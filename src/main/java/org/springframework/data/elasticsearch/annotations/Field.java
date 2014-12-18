@@ -26,7 +26,7 @@ import java.lang.annotation.*;
  * @author Kevin Leturc
  */
 @Retention(RetentionPolicy.RUNTIME)
-@Target(ElementType.FIELD)
+//@Target(ElementType.FIELD)
 @Documented
 @Inherited
 public @interface Field {

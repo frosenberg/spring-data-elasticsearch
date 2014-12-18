@@ -19,13 +19,20 @@ import static org.apache.commons.lang.StringUtils.*;
 import static org.elasticsearch.common.xcontent.XContentFactory.*;
 import static org.springframework.util.StringUtils.*;
 
+import java.beans.BeanInfo;
+import java.beans.Introspector;
+import java.beans.PropertyDescriptor;
 import java.io.IOException;
+import java.lang.reflect.AccessibleObject;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+import org.elasticsearch.common.mvel2.util.ReflectionUtil;
 import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.springframework.beans.BeanUtils;
 import org.springframework.core.GenericCollectionTypeResolver;
 import org.springframework.data.annotation.Transient;
 import org.springframework.data.elasticsearch.annotations.*;
@@ -34,7 +41,10 @@ import org.springframework.data.elasticsearch.core.facet.FacetRequest;
 import org.springframework.data.elasticsearch.core.geo.GeoPoint;
 import org.springframework.data.mapping.model.SimpleTypeHolder;
 import org.springframework.data.util.ClassTypeInformation;
+import org.springframework.data.util.ReflectionUtils;
 import org.springframework.data.util.TypeInformation;
+
+import com.fasterxml.jackson.databind.annotation.JsonSerialize.Typing;
 
 /**
  * @author Rizwan Idrees
@@ -84,10 +94,12 @@ class MappingBuilder {
 
 	private static void mapEntity(XContentBuilder xContentBuilder, Class clazz, boolean isRootObject, String idFieldName,
 								  String nestedObjectFieldName, boolean nestedOrObjectField, FieldType fieldType) throws IOException {
-
-		java.lang.reflect.Field[] fields = retrieveFields(clazz);
-
-		if (!isRootObject && (isAnyPropertyAnnotatedAsField(fields) || nestedOrObjectField)) {
+		
+		List<AccessibleObject> fieldsAndMethods = new ArrayList<AccessibleObject>();
+		fieldsAndMethods.addAll(Arrays.asList(retrieveFields(clazz)));
+		fieldsAndMethods.addAll(Arrays.asList(retrieveMethods(clazz)));
+		
+		if (!isRootObject && (isAnyPropertyAnnotatedAsField(fieldsAndMethods) || nestedOrObjectField)) {
 			String type = FieldType.Object.toString().toLowerCase();
 			if (nestedOrObjectField) {
 				type = fieldType.toString().toLowerCase();
@@ -95,7 +107,7 @@ class MappingBuilder {
 			xContentBuilder.startObject(nestedObjectFieldName).field(FIELD_TYPE, type).startObject(FIELD_PROPERTIES);
 		}
 
-		for (java.lang.reflect.Field field : fields) {
+		for (java.lang.reflect.AccessibleObject field : fieldsAndMethods) {
 
 			if (field.isAnnotationPresent(Transient.class) || isInIgnoreFields(field)) {
 				continue;
@@ -110,7 +122,7 @@ class MappingBuilder {
 					continue;
 				}
 				boolean nestedOrObject = isNestedOrObjectField(field);
-				mapEntity(xContentBuilder, getFieldType(field), false, EMPTY, field.getName(), nestedOrObject, singleField.type());
+				mapEntity(xContentBuilder, getFieldType(field), false, EMPTY, getFieldOrMethodName(field), nestedOrObject, singleField.type());
 				if (nestedOrObject) {
 					continue;
 				}
@@ -118,33 +130,50 @@ class MappingBuilder {
 
 			MultiField multiField = field.getAnnotation(MultiField.class);
 
+			String fieldName = getFieldOrMethodName(field);
 			if (isGeoField) {
-				applyGeoPointFieldMapping(xContentBuilder, field);
+				applyGeoPointFieldMapping(xContentBuilder, fieldName);
 			}
 
 			if (isCompletionField) {
 				CompletionField completionField = field.getAnnotation(CompletionField.class);
-				applyCompletionFieldMapping(xContentBuilder, field, completionField);
+				applyCompletionFieldMapping(xContentBuilder, fieldName, completionField);
 			}
 
 			if (isRootObject && singleField != null && isIdField(field, idFieldName)) {
-				applyDefaultIdFieldMapping(xContentBuilder, field);
+				applyDefaultIdFieldMapping(xContentBuilder, getFieldOrMethodName(field));
 			} else if (multiField != null) {
-				addMultiFieldMapping(xContentBuilder, field, multiField);
+				addMultiFieldMapping(xContentBuilder, getFieldOrMethodName(field), multiField);
 			} else if (singleField != null) {
-				addSingleFieldMapping(xContentBuilder, field, singleField);
+				addSingleFieldMapping(xContentBuilder, getFieldOrMethodName(field), singleField);
 			}
 		}
 
-		if (!isRootObject && isAnyPropertyAnnotatedAsField(fields) || nestedOrObjectField) {
+		if (!isRootObject && isAnyPropertyAnnotatedAsField(fieldsAndMethods) || nestedOrObjectField) {
 			xContentBuilder.endObject().endObject();
 		}
 	}
 
-	private static java.lang.reflect.Field[] retrieveFields(Class clazz) {
+	private static Method[] retrieveMethods(Class clazz) {		
+		// Create list of methods.
+		List<java.lang.reflect.Method> methods = new ArrayList<java.lang.reflect.Method>();
+		
+		// Keep backing up the inheritance hierarchy.
+		Class targetClass = clazz;
+		do {
+			methods.addAll(Arrays.asList(targetClass.getDeclaredMethods()));
+			targetClass = targetClass.getSuperclass();
+		}
+		while (targetClass != null && targetClass != Object.class);
+
+		return methods.toArray(new java.lang.reflect.Method[methods.size()]);
+		
+	}
+
+	private static java.lang.reflect.Field[] retrieveFields(Class clazz) {	
 		// Create list of fields.
 		List<java.lang.reflect.Field> fields = new ArrayList<java.lang.reflect.Field>();
-
+		
 		// Keep backing up the inheritance hierarchy.
 		Class targetClass = clazz;
 		do {
@@ -156,18 +185,18 @@ class MappingBuilder {
 		return fields.toArray(new java.lang.reflect.Field[fields.size()]);
 	}
 
-	private static boolean isAnnotated(java.lang.reflect.Field field) {
+	private static boolean isAnnotated(java.lang.reflect.AccessibleObject field) {
 		return field.getAnnotation(Field.class) != null || field.getAnnotation(MultiField.class) != null || field.getAnnotation(GeoPointField.class) != null || field.getAnnotation(CompletionField.class) != null;
 	}
 
-	private static void applyGeoPointFieldMapping(XContentBuilder xContentBuilder, java.lang.reflect.Field field) throws IOException {
-		xContentBuilder.startObject(field.getName());
+	private static void applyGeoPointFieldMapping(XContentBuilder xContentBuilder, String fieldName) throws IOException {
+		xContentBuilder.startObject(fieldName);
 		xContentBuilder.field(FIELD_TYPE, TYPE_VALUE_GEO_POINT)
 				.endObject();
 	}
 
-	private static void applyCompletionFieldMapping(XContentBuilder xContentBuilder, java.lang.reflect.Field field, CompletionField annotation) throws IOException {
-		xContentBuilder.startObject(field.getName());
+	private static void applyCompletionFieldMapping(XContentBuilder xContentBuilder, String fieldName, CompletionField annotation) throws IOException {
+		xContentBuilder.startObject(fieldName);
 		xContentBuilder.field(FIELD_TYPE, TYPE_VALUE_COMPLETION);
 		if (annotation != null) {
 			xContentBuilder.field(COMPLETION_MAX_INPUT_LENGTH, annotation.maxInputLength());
@@ -184,9 +213,9 @@ class MappingBuilder {
 		xContentBuilder.endObject();
 	}
 
-	private static void applyDefaultIdFieldMapping(XContentBuilder xContentBuilder, java.lang.reflect.Field field)
+	private static void applyDefaultIdFieldMapping(XContentBuilder xContentBuilder, String fieldName)
 			throws IOException {
-		xContentBuilder.startObject(field.getName())
+		xContentBuilder.startObject(fieldName)
 				.field(FIELD_TYPE, TYPE_VALUE_STRING)
 				.field(FIELD_INDEX, INDEX_VALUE_NOT_ANALYZED);
 		xContentBuilder.endObject();
@@ -197,9 +226,9 @@ class MappingBuilder {
 	 *
 	 * @throws IOException
 	 */
-	private static void addSingleFieldMapping(XContentBuilder xContentBuilder, java.lang.reflect.Field field,
+	private static void addSingleFieldMapping(XContentBuilder xContentBuilder, String fieldName,
 											  Field fieldAnnotation) throws IOException {
-		xContentBuilder.startObject(field.getName());
+		xContentBuilder.startObject(fieldName);
 		xContentBuilder.field(FIELD_STORE, fieldAnnotation.store());
 		if (FieldType.Auto != fieldAnnotation.type()) {
 			xContentBuilder.field(FIELD_TYPE, fieldAnnotation.type().name().toLowerCase());
@@ -225,9 +254,9 @@ class MappingBuilder {
 	 *
 	 * @throws IOException
 	 */
-	private static void addNestedFieldMapping(XContentBuilder builder, java.lang.reflect.Field field,
+	private static void addNestedFieldMapping(XContentBuilder builder, String fieldName,
 											  NestedField annotation) throws IOException {
-		builder.startObject(field.getName() + "." + annotation.dotSuffix());
+		builder.startObject(fieldName + "." + annotation.dotSuffix());
 		builder.field(FIELD_STORE, annotation.store());
 		if (FieldType.Auto != annotation.type()) {
 			builder.field(FIELD_TYPE, annotation.type().name().toLowerCase());
@@ -249,15 +278,15 @@ class MappingBuilder {
 	 *
 	 * @throws IOException
 	 */
-	private static void addMultiFieldMapping(XContentBuilder builder, java.lang.reflect.Field field,
+	private static void addMultiFieldMapping(XContentBuilder builder, String fieldName,
 											 MultiField annotation) throws IOException {
-		builder.startObject(field.getName());
+		builder.startObject(fieldName);
 		builder.field(FIELD_TYPE, "multi_field");
 		builder.startObject("fields");
 		//add standard field
-		addSingleFieldMapping(builder, field, annotation.mainField());
+		addSingleFieldMapping(builder, fieldName, annotation.mainField());
 		for (NestedField nestedField : annotation.otherFields()) {
-			addNestedFieldMapping(builder, field, nestedField);
+			addNestedFieldMapping(builder, fieldName, nestedField);
 		}
 		builder.endObject();
 		builder.endObject();
@@ -290,25 +319,35 @@ class MappingBuilder {
 		builder.endObject();
 	}
 
-	protected static boolean isEntity(java.lang.reflect.Field field) {
-		TypeInformation typeInformation = ClassTypeInformation.from(field.getType());
+	protected static boolean isEntity(java.lang.reflect.AccessibleObject field) {
+		TypeInformation typeInformation = ClassTypeInformation.from(getFieldOrMethodType(field));
 		Class<?> clazz = getFieldType(field);
 		boolean isComplexType = !SIMPLE_TYPE_HOLDER.isSimpleType(clazz);
 		return isComplexType && !Map.class.isAssignableFrom(typeInformation.getType());
 	}
 
-	protected static Class<?> getFieldType(java.lang.reflect.Field field) {
-		Class<?> clazz = field.getType();
+	protected static Class<?> getFieldType(java.lang.reflect.AccessibleObject field) {
+		Class<?> clazz = getFieldOrMethodType(field);
+		// FIXME get field type associated with a method
 		TypeInformation typeInformation = ClassTypeInformation.from(clazz);
 		if (typeInformation.isCollectionLike()) {
-			clazz = GenericCollectionTypeResolver.getCollectionFieldType(field) != null ? GenericCollectionTypeResolver.getCollectionFieldType(field) : typeInformation.getComponentType().getType();
+			
+			if (field instanceof java.lang.reflect.Field) {
+				 java.lang.reflect.Field f = (java.lang.reflect.Field)field;						
+				 clazz = GenericCollectionTypeResolver.getCollectionFieldType(f) != null ? 
+						 GenericCollectionTypeResolver.getCollectionFieldType(f) : typeInformation.getComponentType().getType();
+			} else if (field instanceof java.lang.reflect.Method) {
+				 java.lang.reflect.Method m = (java.lang.reflect.Method)field;						
+				 clazz = GenericCollectionTypeResolver.getCollectionReturnType(m) != null ? 
+						 GenericCollectionTypeResolver.getCollectionReturnType(m) : typeInformation.getComponentType().getType();
+			}
 		}
 		return clazz;
 	}
 
-	private static boolean isAnyPropertyAnnotatedAsField(java.lang.reflect.Field[] fields) {
+	private static boolean isAnyPropertyAnnotatedAsField(List<java.lang.reflect.AccessibleObject> fields) {
 		if (fields != null) {
-			for (java.lang.reflect.Field field : fields) {
+			for (java.lang.reflect.AccessibleObject field : fields) {
 				if (field.isAnnotationPresent(Field.class)) {
 					return true;
 				}
@@ -317,29 +356,53 @@ class MappingBuilder {
 		return false;
 	}
 
-	private static boolean isIdField(java.lang.reflect.Field field, String idFieldName) {
-		return idFieldName.equals(field.getName());
+	private static boolean isIdField(java.lang.reflect.AccessibleObject field, String idFieldName) {
+		return idFieldName.equals( getFieldOrMethodName(field) );
 	}
 
-	private static boolean isInIgnoreFields(java.lang.reflect.Field field) {
+	private static boolean isInIgnoreFields(java.lang.reflect.AccessibleObject field) {
 		Field fieldAnnotation = field.getAnnotation(Field.class);
 		if (null != fieldAnnotation) {
 			String[] ignoreFields = fieldAnnotation.ignoreFields();
-			return Arrays.asList(ignoreFields).contains(field.getName());
+			String name = getFieldOrMethodName(field);
+			return Arrays.asList(ignoreFields).contains(name);
 		}
 		return false;
 	}
 
-	private static boolean isNestedOrObjectField(java.lang.reflect.Field field) {
+	private static boolean isNestedOrObjectField(java.lang.reflect.AccessibleObject field) {
 		Field fieldAnnotation = field.getAnnotation(Field.class);
 		return fieldAnnotation != null && (FieldType.Nested == fieldAnnotation.type() || FieldType.Object == fieldAnnotation.type());
 	}
 
-	private static boolean isGeoField(java.lang.reflect.Field field) {
-		return field.getType() == GeoPoint.class || field.getAnnotation(GeoPointField.class) != null;
+	private static boolean isGeoField(java.lang.reflect.AccessibleObject field) {		
+		return getFieldOrMethodType(field) == GeoPoint.class || field.getAnnotation(GeoPointField.class) != null;
 	}
 
-	private static boolean isCompletionField(java.lang.reflect.Field field) {
-		return field.getType() == Completion.class;
+	private static boolean isCompletionField(java.lang.reflect.AccessibleObject field) {
+		return getFieldOrMethodType(field) == Completion.class;
+	}
+	
+	private static Class<?> getFieldOrMethodType(AccessibleObject obj) {
+		Class<?> clazz = null;
+		if (obj instanceof java.lang.reflect.Field) {
+			clazz = ((java.lang.reflect.Field)obj).getType();
+		} else if (obj instanceof Method){
+			clazz = ((Method)obj).getReturnType();
+		}		
+		return clazz;
+	}
+	
+	private static String getFieldOrMethodName(AccessibleObject obj) {
+		String name = null;
+		if (obj instanceof java.lang.reflect.Field) {
+			name = ((java.lang.reflect.Field)obj).getName();
+		} else if (obj instanceof Method){
+			PropertyDescriptor pd = BeanUtils.findPropertyForMethod((Method)obj);
+			if (pd != null) {
+				name = pd.getName();
+			}
+		}		
+		return name;
 	}
 }

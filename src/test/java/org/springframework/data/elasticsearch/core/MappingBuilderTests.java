@@ -77,6 +77,18 @@ public class MappingBuilderTests {
 		//Then
 		assertThat(xContentBuilder.string(), is(expected));
 	}
+	
+	@Test
+	public void shouldUseValueFromAnnotationMethods() throws IOException {
+		//Given
+		final String expected = "{\"mapping\":{\"properties\":{\"price\":{\"store\":false,\"type\":\"double\"}}}}";
+
+		//When
+		XContentBuilder xContentBuilder = MappingBuilder.buildMapping(StockPriceFields.class, "mapping", "id", null);
+
+		//Then
+		assertThat(xContentBuilder.string(), is(expected));
+	}
 
 	@Test
 	public void shouldAddStockPriceDocumentToIndex() throws IOException {
