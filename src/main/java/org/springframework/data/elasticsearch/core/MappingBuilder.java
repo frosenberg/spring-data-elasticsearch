@@ -132,6 +132,7 @@ class MappingBuilder {
 
 			String fieldName = getFieldOrMethodName(field);
 			if (isGeoField) {
+				// TODO this may be a potential problem
 				applyGeoPointFieldMapping(xContentBuilder, fieldName);
 			}
 
@@ -380,7 +381,7 @@ class MappingBuilder {
 	}
 
 	private static boolean isCompletionField(java.lang.reflect.AccessibleObject field) {
-		return getFieldOrMethodType(field) == Completion.class;
+		return getFieldOrMethodType(field) == Completion.class && field instanceof java.lang.reflect.Field;
 	}
 	
 	private static Class<?> getFieldOrMethodType(AccessibleObject obj) {
